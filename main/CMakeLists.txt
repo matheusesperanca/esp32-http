@@ -1,0 +1,12 @@
+idf_component_register(SRCS
+"src/main.c"
+"../platform_drivers/system/src/system.c"
+"../platform_drivers/wifi/src/wifi.c"
+"../platform_drivers/http/src/http.c"
+INCLUDE_DIRS
+"."
+"inc"
+"../platform_drivers/system/inc"
+"../platform_drivers/wifi/inc"
+"../platform_drivers/http/inc"
+)

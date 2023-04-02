@@ -1,0 +1,190 @@
+// 1 - Includes de bibliotecas de suporte a aplicacao
+#include <stdio.h>
+#include <sys/param.h>
+
+// includes do freertos
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/timers.h>
+#include <freertos/event_groups.h>
+
+// includes do esp32
+#include <esp_wifi.h>
+#include <esp_log.h>
+#include <esp_netif.h>
+#include <esp_http_server.h>
+#include <nvs_flash.h>
+
+// 2 - Defines e variaveis globais
+// Coloque aqui seu ssid e senha pra wifi
+#define SSID "LabDexter"
+#define PASS "V0S7R01500"
+
+// 3 - Prototipos de funcoes
+static void wifi_init(void);
+static void wifi_event_handler(void *event_handler_arg,
+                              esp_event_base_t event_base,
+                              int32_t event_id,
+                              void *event_data);
+static esp_err_t get_handler(httpd_req_t *req);
+static esp_err_t post_handler(httpd_req_t *req);
+static httpd_handle_t start_esp32_webserver(void);
+
+// 4 - Implementacao da coisa toda
+static void wifi_event_handler(void *event_handler_arg,
+                              esp_event_base_t event_base,
+                              int32_t event_id,
+                              void *event_data)
+{
+    switch(event_id)
+    {
+        case WIFI_EVENT_STA_START:
+            ESP_LOGI("WIFI", "WiFi Connecting...");
+            break;
+        case WIFI_EVENT_STA_CONNECTED:
+            ESP_LOGI("WIFI", "WiFi Connected...");
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            ESP_LOGE("WIFI", "Wifi lost connection!");
+            break;
+        case IP_EVENT_STA_GOT_IP:
+            ESP_LOGI("WIFI", "Wifi got ip!");
+            ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+            ESP_LOGI("WIFI", "IP: " IPSTR, IP2STR(&event->ip_info.ip));
+            break;
+        default:
+            break;
+    }
+}
+
+static void wifi_init(void)
+{
+    // 1 - Inicializacao das pilhas de WiFi e LWiP
+    esp_netif_init();
+    esp_event_loop_create_default();        // event loop
+    esp_netif_create_default_wifi_sta();    // wifi station
+    wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&wifi_init_config);
+    
+    // 2 - Configuracao do WiFi
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = SSID,
+            .password = PASS
+        }
+    };
+
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+    // 3 - Inicializacao do WiFi
+    esp_wifi_start();
+    // 4 - Conexao do WiFi
+    esp_wifi_connect();
+}
+
+static esp_err_t get_handler(httpd_req_t *req)
+{
+    // Nos iremos percorrer a url de requisicao GET e identificar um ou mais parametros
+    char *buf;
+    size_t buf_len;
+    // Primeiro, lemos a URL e obtemos o Host da requisicao
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1; //+1 por conta do \0 que vem junto
+    if (buf_len > 1)
+    {
+        buf = malloc(buf_len);
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK)
+        {
+            ESP_LOGI("HTTPD", "Host: %s", buf);
+        }
+        free(buf);
+    }
+
+    // Segundo, agora vamos obter um ou mais parametros, conforme esperado
+    buf_len = httpd_req_get_url_query_len(req) + 1; //+1 por conta do \0 que vem junto
+    if (buf_len > 1)
+    {
+        buf = malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK)
+        {
+            ESP_LOGI("HTTPD", "Query String: %s", buf);
+            char param[32]; // dimensionado para armazenar os valores a serem interpretados
+            if (httpd_query_key_value(buf, "teste", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI("HTTPD", "O valor de teste eh:> %s", param);
+            }
+            // Podemos ter outros "ifs" conforme mais parametros que venham junto ao GET.
+        }
+        free(buf);
+    }
+
+    const char resp[] = "OLA MUNDO GET HTTP com ESP32!"; // como tornar isso html? :)
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t post_handler(httpd_req_t *req)
+{
+    char content[255]; // buffer de destino para tratar o conteudo de uma requisicao post
+    memset(content,0,255);
+
+    size_t recv_size = MIN(req->content_len, sizeof(content));
+
+    int ret = httpd_req_recv(req, content, recv_size);
+
+    if (ret <= 0) // 0 indica que a conexao foi encerrada, sem bytes
+    {
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            httpd_resp_send_408(req);
+        }
+        return ESP_FAIL;
+    }
+
+    content[recv_size] = '\0'; // soh vale para indicar fim de strings! ASCII
+
+    printf("Recebemos o seguinte conteudo: %s \n", content);
+
+    const char resp[] = "OLA MUNDO POST HTTP com ESP32!";
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);    
+    return ESP_OK;
+}
+
+static httpd_handle_t start_esp32_webserver(void)
+{
+    // Geramos a configuracao padrao
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // Referencia para o servidor HTTP - A priori, nula
+    httpd_handle_t server = NULL;
+
+    //Vamos configurar as callbacks de requisicoes http:
+    httpd_uri_t uri_get = {
+        .uri = "/", //uri ou url raiz
+        .method = HTTP_GET,
+        .handler = get_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t uri_post = {
+        .uri = "/", // uri ou url raiz
+        .method = HTTP_POST,
+        .handler = post_handler,
+        .user_ctx = NULL
+    };
+
+    // Inicializamos o servidor http:
+    if (httpd_start(&server, &config) == ESP_OK)
+    {
+        httpd_register_uri_handler(server, &uri_get);
+        httpd_register_uri_handler(server, &uri_post);
+    }
+    return server;
+}
+
+// 5 - Execucao da aplicacao principal
+void app_main(void)
+{
+    nvs_flash_init();
+    wifi_init();
+    start_esp32_webserver();
+}
